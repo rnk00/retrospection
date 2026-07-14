@@ -1,5 +1,6 @@
--- Retrospective AI - MVP schema (docs/erd.md §1 기준)
--- Advanced/Extension 테이블은 별도 파일에서 추가 예정
+-- Retrospective AI - 전체 스키마 (docs/erd.md 기준)
+-- createdAt/updatedAt은 DB DEFAULT 없이 애플리케이션(JPA Auditing)이 채운다.
+-- 참고: dev-log/deep-dive/02. user 테이블에 createdAt, updateAt이 필요할까.md
 
 CREATE DATABASE IF NOT EXISTS retrospective
     CHARACTER SET utf8mb4
@@ -7,43 +8,133 @@ CREATE DATABASE IF NOT EXISTS retrospective
 
 USE retrospective;
 
+-- ============================================================
+-- 사용자 정보 + 소셜 로그인 + GitHub 연동(PAT) 설정을 저장하는 테이블
+-- 소셜 로그인(카카오/GitHub)만 지원하므로 password는 없음
+-- provider 계정 간 병합을 하지 않기로 해서, 유저는 평생 정확히 하나의
+-- (provider, provider_user_id)만 가짐 -> OAuthAccount를 별도 테이블로
+-- 분리할 이유가 없어져서 User에 직접 통합함
+-- ============================================================
 CREATE TABLE user (
-    id                   BIGINT AUTO_INCREMENT PRIMARY KEY,
-    email                VARCHAR(255)    NOT NULL,
-    password             VARCHAR(255)    NULL,
-    nickname             VARCHAR(50)     NOT NULL,
-    repo_owner           VARCHAR(255)    NULL,
-    repo_name            VARCHAR(255)    NULL,
-    auto_commit_enabled  BOOLEAN         NULL DEFAULT FALSE,
-    created_at           DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at           DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_user_email (email)
+    id                   BIGINT AUTO_INCREMENT PRIMARY KEY,   -- 사용자 PK
+    email                VARCHAR(255)    NOT NULL,            -- 표시용 이메일 (provider가 같아도 여러 유저가 같은 이메일을 가질 수 있어 UNIQUE 아님)
+    nickname             VARCHAR(50)     NOT NULL,            -- 사용자 닉네임
+    provider             VARCHAR(20)     NOT NULL,            -- 'KAKAO' 또는 'GITHUB'
+    provider_user_id     VARCHAR(255)    NOT NULL,            -- provider가 발급한 고유 ID
+    repo_owner           VARCHAR(255)    NULL,                -- GitHub 연동 시에만 사용
+    repo_name            VARCHAR(255)    NULL,                -- GitHub 연동 시에만 사용
+    github_pat           VARCHAR(255)    NULL,                -- GitHub Personal Access Token (암호화 저장 필요)
+    auto_commit_enabled  BOOLEAN         NULL DEFAULT FALSE,  -- GitHub 자동 커밋 사용 여부
+    created_at           DATETIME        NOT NULL,            -- 최초 가입 시간
+    updated_at           DATETIME        NOT NULL,            -- 마지막 수정 시간
+    UNIQUE KEY uq_user_provider (provider, provider_user_id)  -- 같은 provider 계정으로 중복 가입 방지
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE oauth_account (
-    id                 BIGINT AUTO_INCREMENT PRIMARY KEY,
-    user_id            BIGINT        NOT NULL,
-    provider           VARCHAR(20)   NOT NULL,
-    provider_user_id   VARCHAR(255)  NOT NULL,
-    access_token       VARCHAR(500)  NULL,
-    created_at         DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_oauth_account_user
-        FOREIGN KEY (user_id) REFERENCES user (id)
+-- ============================================================
+-- 사용자가 작성한 회고(날짜, 점수)를 저장하는 테이블
+-- 관계 : User(1) : Retrospective(N)
+-- keep/problem/try는 더 이상 텍스트 컬럼이 아니라 KPT_ITEM으로 분리됨
+-- (항목별 드래그 순서 변경, 최대 20개, 항목 단위 자동저장을 지원해야 해서)
+-- ============================================================
+CREATE TABLE retrospective (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id     BIGINT   NOT NULL,             -- user.id 참조
+    date        DATE     NOT NULL,             -- 회고 날짜
+    score       INT      NOT NULL DEFAULT 3,   -- 만족도 점수 1~5, 기본값 3
+    created_at  DATETIME NOT NULL,
+    updated_at  DATETIME NOT NULL,
+
+    FOREIGN KEY (user_id) REFERENCES user (id)
+        ON DELETE CASCADE,   -- 회원 탈퇴 시 회고도 함께 삭제
+    UNIQUE KEY uq_retrospective_user_date (user_id, date)
+        -- 캘린더가 날짜 단위로 작성 여부를 보여주므로 하루 1개로 제한
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 회고 하나에 속한 KPT 항목(Keep/Problem/Try)을 저장하는 테이블
+-- 관계 : Retrospective(1) : KptItem(N)
+-- type별로 최대 20개까지 (서버에서 개수 검증), 빈 항목(content, detail 둘 다
+-- 공백)은 저장하지 않음. sequence_order로 드래그 순서를 관리하고,
+-- 화면의 "K1"/"K2" 같은 라벨은 이 순서로 계산해서 보여줄 뿐 저장하지 않음
+-- ============================================================
+CREATE TABLE kpt_item (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    retrospective_id  BIGINT       NOT NULL,   -- retrospective.id 참조
+    type              VARCHAR(10)  NOT NULL,   -- 'KEEP', 'PROBLEM', 'TRY'
+    content           TEXT         NOT NULL,   -- 핵심 내용
+    detail            TEXT         NULL,       -- 이유(Keep)/원인(Problem)/규칙(Try)
+    sequence_order     INT          NOT NULL,   -- 같은 type 안에서의 표시 순서
+
+    FOREIGN KEY (retrospective_id) REFERENCES retrospective (id)
+        ON DELETE CASCADE   -- 회고 삭제 시 KPT 항목도 함께 삭제
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 회고 하나에 대해 AI가 생성한 Try 추천 이력을 저장하는 테이블
+-- 관계 : Retrospective(1) : AiRecommendation(N)
+-- "다시 추천받기"로 재생성될 때마다 이전 이력을 보존하기 위해 분리
+-- ============================================================
+CREATE TABLE ai_recommendation (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    retrospective_id  BIGINT   NOT NULL,   -- retrospective.id 참조
+    suggested_try     TEXT     NOT NULL,   -- AI가 추천한 다음 행동
+    created_at        DATETIME NOT NULL,   -- 최신순 정렬 기준 (수정 이력이 없어 updated_at 없음)
+
+    FOREIGN KEY (retrospective_id) REFERENCES retrospective (id)
+        ON DELETE CASCADE   -- 회고 삭제 시 추천 이력도 함께 삭제
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 홈(캘린더) 화면에 표시할, 이번 주 회고를 AI가 요약한 결과를 저장하는 테이블
+-- 관계 : User(1) : WeeklySummary(N)
+-- 기간은 항상 고정 7일이라 week_end는 저장하지 않음 (week_start + 6일로 계산)
+-- ============================================================
+CREATE TABLE weekly_summary (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id           BIGINT   NOT NULL,   -- user.id 참조
+    week_start        DATE     NOT NULL,   -- 그 주의 월요일
+    summary_content   TEXT     NOT NULL,   -- AI 요약 본문
+    created_at        DATETIME NOT NULL,
+
+    FOREIGN KEY (user_id) REFERENCES user (id)
+        ON DELETE CASCADE,
+    UNIQUE KEY uq_weekly_summary_user_week (user_id, week_start)
+        -- 같은 주에 대한 요약은 하나만 유지 (재생성 시 덮어씀)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 통계 화면에서 사용자가 기간을 직접 골라 저장한 AI 요약을 저장하는 테이블
+-- 관계 : User(1) : Summary(N)
+-- WEEKLY_SUMMARY와 다르게 기간이 자유롭고, 미리보기 후 사용자가 "저장"을 눌러야 남음
+-- 같은 기간을 여러 번 저장해도 되므로 UNIQUE 제약 없음 (개별 삭제로 정리)
+-- ============================================================
+CREATE TABLE summary (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id           BIGINT   NOT NULL,   -- user.id 참조
+    period_start      DATE     NOT NULL,
+    period_end        DATE     NOT NULL,
+    summary_content   TEXT     NOT NULL,
+    created_at        DATETIME NOT NULL,
+
+    FOREIGN KEY (user_id) REFERENCES user (id)
         ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE retrospective (
-    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
-    user_id     BIGINT   NOT NULL,
-    date        DATE     NOT NULL,
-    keep        TEXT     NULL,
-    problem     TEXT     NULL,
-    try         TEXT     NULL,
-    score       INT      NULL,
-    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    CONSTRAINT fk_retrospective_user
-        FOREIGN KEY (user_id) REFERENCES user (id)
-        ON DELETE CASCADE,
-    UNIQUE KEY uq_retrospective_user_date (user_id, date)
+-- ============================================================
+-- 사용자가 기간을 직접 골라 저장한, 반복 문제 분석 결과를 저장하는 테이블
+-- 관계 : User(1) : ProblemPattern(N)
+-- 핵심 컬럼 : problem(반복된 문제) / try(추천 행동)을 분리해 화면에 각각 표시
+-- SUMMARY와 동일하게 미리보기 후 저장 방식이라 UNIQUE 제약 없음 (개별 삭제로 정리)
+-- ============================================================
+CREATE TABLE problem_pattern (
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id        BIGINT   NOT NULL,   -- user.id 참조
+    period_start   DATE     NOT NULL,
+    period_end     DATE     NOT NULL,
+    problem        TEXT     NOT NULL,   -- 반복된 문제
+    try            TEXT     NOT NULL,   -- 추천 행동
+    created_at     DATETIME NOT NULL,
+
+    FOREIGN KEY (user_id) REFERENCES user (id)
+        ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
