@@ -53,8 +53,8 @@ CREATE TABLE retrospective (
 -- ============================================================
 -- 회고 하나에 속한 KPT 항목(Keep/Problem/Try)을 저장하는 테이블
 -- 관계 : Retrospective(1) : KptItem(N)
--- type별로 최대 20개까지 (서버에서 개수 검증), 빈 항목(content, detail 둘 다
--- 공백)은 저장하지 않음. sequence_order로 드래그 순서를 관리하고,
+-- type별로 최대 20개까지 (서버에서 개수 검증), 빈 항목(content 공백)은
+-- 저장하지 않음. sequence_order로 드래그 순서를 관리하고,
 -- 화면의 "K1"/"K2" 같은 라벨은 이 순서로 계산해서 보여줄 뿐 저장하지 않음
 -- ============================================================
 CREATE TABLE kpt_item (
@@ -62,11 +62,30 @@ CREATE TABLE kpt_item (
     retrospective_id  BIGINT       NOT NULL,   -- retrospective.id 참조
     type              VARCHAR(10)  NOT NULL,   -- 'KEEP', 'PROBLEM', 'TRY'
     content           TEXT         NOT NULL,   -- 핵심 내용
-    detail            TEXT         NULL,       -- 이유(Keep)/원인(Problem)/규칙(Try)
     sequence_order     INT          NOT NULL,   -- 같은 type 안에서의 표시 순서
 
     FOREIGN KEY (retrospective_id) REFERENCES retrospective (id)
         ON DELETE CASCADE   -- 회고 삭제 시 KPT 항목도 함께 삭제
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 날짜/회고에 묶이지 않고 캘린더 화면에 독립적으로 쌓이는 KPT 메모 테이블
+-- 관계 : User(1) : KptNote(N)
+-- 지키고 싶은 Keep, 반복되는 Problem, 하고 싶은 Try를 사용자가 직접 추가/관리
+-- (캘린더 화면과 분석 탭 양쪽에서 추가 가능, AI는 관여하지 않는 순수 메모)
+-- type별로 최대 20개까지 (서버에서 개수 검증), sequence_order로 드래그 순서 관리
+-- ============================================================
+CREATE TABLE kpt_note (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id         BIGINT       NOT NULL,   -- user.id 참조
+    type            VARCHAR(10)  NOT NULL,   -- 'KEEP', 'PROBLEM', 'TRY'
+    content         TEXT         NOT NULL,   -- 메모 내용
+    sequence_order  INT          NOT NULL,   -- 같은 type 안에서의 표시 순서
+    created_at      DATETIME     NOT NULL,
+    updated_at      DATETIME     NOT NULL,
+
+    FOREIGN KEY (user_id) REFERENCES user (id)
+        ON DELETE CASCADE   -- 회원 탈퇴 시 메모도 함께 삭제
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -85,9 +104,12 @@ CREATE TABLE ai_recommendation (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
--- 홈(캘린더) 화면에 표시할, 이번 주 회고를 AI가 요약한 결과를 저장하는 테이블
+-- 홈(캘린더) 화면에 표시할, 주별 회고를 AI가 요약한 결과를 저장하는 테이블
 -- 관계 : User(1) : WeeklySummary(N)
--- 기간은 항상 고정 7일이라 week_end는 저장하지 않음 (week_start + 6일로 계산)
+-- 고정 달력 주(월~일) 단위. week_end는 저장하지 않음 (week_start + 6일로 계산)
+-- "이번 주"는 방문 시 없으면 자동 생성, 있으면 캐시 반환 (재생성 시 덮어씀).
+-- 지난 주들은 캘린더 화면에서 넘겨보기 가능 — 이때도 해당 주의 요약이
+-- 없으면 그 자리에서 생성해서 저장함 (읽은 적 없는 과거 주 포함)
 -- ============================================================
 CREATE TABLE weekly_summary (
     id                BIGINT AUTO_INCREMENT PRIMARY KEY,
