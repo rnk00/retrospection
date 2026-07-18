@@ -24,7 +24,7 @@ CREATE TABLE user (
     repo_owner           VARCHAR(255)    NULL,                -- GitHub 연동 시에만 사용
     repo_name            VARCHAR(255)    NULL,                -- GitHub 연동 시에만 사용
     github_pat           VARCHAR(255)    NULL,                -- GitHub Personal Access Token (암호화 저장 필요)
-    auto_commit_enabled  BOOLEAN         NULL DEFAULT FALSE,  -- GitHub 자동 커밋 사용 여부
+    github_upload_enabled  BOOLEAN         NULL DEFAULT FALSE,  -- GitHub 자동 커밋 사용 여부
     created_at           DATETIME        NOT NULL,            -- 최초 가입 시간
     updated_at           DATETIME        NOT NULL,            -- 마지막 수정 시간
     UNIQUE KEY uq_user_provider (provider, provider_user_id)  -- 같은 provider 계정으로 중복 가입 방지
