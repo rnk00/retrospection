@@ -41,6 +41,7 @@ CREATE TABLE retrospective (
     user_id     BIGINT   NOT NULL,             -- user.id 참조
     date        DATE     NOT NULL,             -- 회고 날짜
     score       INT      NOT NULL DEFAULT 3,   -- 만족도 점수 1~5, 기본값 3
+    is_github_synced BOOLEAN NOT NULL DEFAULT FALSE, -- 마지막 GitHub 업로드 이후 수정 여부 (점수/KPT 항목 변경 시 false로 되돌림)
     created_at  DATETIME NOT NULL,
     updated_at  DATETIME NOT NULL,
 
