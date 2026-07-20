@@ -31,6 +31,25 @@ CREATE TABLE user (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
+-- 로그인 상태 유지를 위한 Refresh Token을 저장하는 테이블
+-- 관계 : User(1) : RefreshToken(N) - 기기별로 여러 개 가질 수 있음 (로그인 유지 독립적)
+-- Access Token(JWT)은 서명만 검증하면 되어 DB 저장이 필요 없지만,
+-- Refresh Token은 로그아웃 시 진짜로 무효화(삭제)할 수 있어야 해서 DB로 관리함
+-- ============================================================
+CREATE TABLE refresh_token (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id     BIGINT       NOT NULL,   -- user.id 참조
+    token       VARCHAR(255) NOT NULL,   -- 리프레시 토큰 값
+    expires_at  DATETIME     NOT NULL,   -- 만료 시각
+    created_at  DATETIME     NOT NULL,
+
+    FOREIGN KEY (user_id) REFERENCES user (id)
+        ON DELETE CASCADE,   -- 회원 탈퇴 시 함께 삭제
+    UNIQUE KEY uq_refresh_token_token (token)
+        -- 토큰 값으로 빠르고 정확하게 조회하기 위함
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
 -- 사용자가 작성한 회고(날짜, 점수)를 저장하는 테이블
 -- 관계 : User(1) : Retrospective(N)
 -- keep/problem/try는 더 이상 텍스트 컬럼이 아니라 KPT_ITEM으로 분리됨
@@ -146,7 +165,7 @@ CREATE TABLE summary (
 -- ============================================================
 -- 사용자가 기간을 직접 골라 저장한, 반복 문제 분석 결과를 저장하는 테이블
 -- 관계 : User(1) : ProblemPattern(N)
--- 핵심 컬럼 : problem(반복된 문제) / try(추천 행동)을 분리해 화면에 각각 표시
+-- 핵심 컬럼 : problem(반복된 문제). 추천 행동(try)은 여러 개라 별도 테이블로 분리
 -- SUMMARY와 동일하게 미리보기 후 저장 방식이라 UNIQUE 제약 없음 (개별 삭제로 정리)
 -- ============================================================
 CREATE TABLE problem_pattern (
@@ -155,9 +174,22 @@ CREATE TABLE problem_pattern (
     period_start   DATE     NOT NULL,
     period_end     DATE     NOT NULL,
     problem        TEXT     NOT NULL,   -- 반복된 문제
-    try            TEXT     NOT NULL,   -- 추천 행동
     created_at     DATETIME NOT NULL,
 
     FOREIGN KEY (user_id) REFERENCES user (id)
+        ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- ProblemPattern 하나에 대해 AI가 추천한 여러 개의 Try를 저장하는 테이블
+-- 관계 : ProblemPattern(1) : ProblemPatternTry(N)
+-- 화면에 번호(①②③)는 안 붙이지만, 여러 개의 추천을 리스트로 보여줘야 해서 분리
+-- ============================================================
+CREATE TABLE problem_pattern_try (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    problem_pattern_id  BIGINT NOT NULL,   -- problem_pattern.id 참조
+    content             TEXT   NOT NULL,   -- 추천 행동
+
+    FOREIGN KEY (problem_pattern_id) REFERENCES problem_pattern (id)
         ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
